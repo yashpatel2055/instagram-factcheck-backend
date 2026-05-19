@@ -10,6 +10,19 @@ const DOWNLOADS_DIR = path.join(__dirname, '../downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
 /**
+ * Writes Instagram cookies from env var to a temp file and returns the path.
+ * Returns null if no cookies configured.
+ */
+function getCookiesFilePath(jobId) {
+  const cookies = process.env.INSTAGRAM_COOKIES;
+  if (!cookies) return null;
+
+  const cookiesPath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
+  fs.writeFileSync(cookiesPath, cookies, 'utf8');
+  return cookiesPath;
+}
+
+/**
  * Downloads an Instagram reel using yt-dlp
  * Returns { jobId, videoPath, metaPath }
  */
@@ -22,6 +35,11 @@ function downloadReel(url) {
     log.step(`Downloading reel: ${url}`);
 
     const python = process.env.PYTHON_PATH || 'python3';
+
+    // Write cookies to temp file if available
+    const cookiesPath = getCookiesFilePath(jobId);
+    const cookiesFlag = cookiesPath ? `--cookies "${cookiesPath}"` : '';
+
     const cmd = [
       `${python} -m yt_dlp`,
       `"${url}"`,
@@ -30,7 +48,8 @@ function downloadReel(url) {
       '--no-playlist',
       '--quiet',
       '--no-warnings',
-    ].join(' ');
+      cookiesFlag,
+    ].filter(Boolean).join(' ');
 
     exec(cmd, { timeout: 60000 }, (err, stdout, stderr) => {
       // Parse metadata first (available even on error)
@@ -94,4 +113,4 @@ function cleanupJob(jobId) {
   log.info(`Cleaned up job: ${jobId}`);
 }
 
-module.exports = { downloadReel, cleanupJob };
+module.exports = { downloadReel, cleanupJob, getCookiesFilePath };
