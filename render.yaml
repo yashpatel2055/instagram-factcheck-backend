@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: factcheck-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SERPAPI_KEY
+        sync: false
+      - key: GOOGLE_FACTCHECK_KEY
+        sync: false
