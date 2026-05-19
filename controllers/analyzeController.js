@@ -4,69 +4,62 @@ const { transcribeAudio }         = require('../ai/transcribeService');
 const { detectClaims }            = require('../ai/claimService');
 const { verifyAllClaims }         = require('../ai/verifyService');
 const { calculateScore }          = require('../services/scoreService');
+const { v4: uuidv4 }              = require('uuid');
 const log                         = require('../utils/logger');
 
-async function analyzeReel(req, res) {
-  const { url } = req.body;
+// ── In-memory job store ───────────────────────────────────────────────────────
+// { jobId: { status: 'pending'|'complete'|'error', step, result, error } }
+const jobs = new Map();
 
-  // ── Validate URL ────────────────────────────────────────────────────────────
-  if (!url || !url.match(/instagram\.com\/(reel|p)\//i)) {
-    return res.status(400).json({ error: 'Invalid Instagram Reel or Post URL' });
-  }
+// Clean up completed jobs after 10 minutes
+function scheduleCleanup(jobId) {
+  setTimeout(() => jobs.delete(jobId), 10 * 60 * 1000);
+}
 
-  let jobId = null;
+// ── Background analysis runner ────────────────────────────────────────────────
+async function runAnalysis(jobId, url) {
+  let downloadJobId = null;
+
+  const setStep = (step) => {
+    const job = jobs.get(jobId);
+    if (job) { job.step = step; job.stepLabel = step; }
+  };
 
   try {
-    // ── Step 1: Download / fetch metadata ────────────────────────────────────
-    log.step('Step 1 — Fetching content');
+    setStep('Downloading reel...');
     const { jobId: id, videoPath, meta, mediaType } = await downloadReel(url);
-    jobId = id;
+    downloadJobId = id;
 
     let transcript = '';
     let language   = 'en';
 
     if (mediaType === 'video' && videoPath) {
-      // ── Step 2: Extract audio ───────────────────────────────────────────────
-      log.step('Step 2 — Extracting audio');
+      setStep('Extracting audio...');
       const audioPath = await extractAudio(videoPath);
 
-      // ── Step 3: Transcribe ──────────────────────────────────────────────────
-      log.step('Step 3 — Transcribing speech');
+      setStep('Transcribing speech...');
       const result = await transcribeAudio(audioPath);
       transcript   = result.transcript;
       language     = result.language;
-
     } else {
-      // ── Photo post: use caption + description as text source ────────────────
-      log.step('Step 2 — Extracting text from caption');
+      setStep('Extracting caption text...');
       const parts = [meta.title, meta.description].filter(Boolean);
-      transcript  = parts.join(' ').trim();
-      language    = 'en';
-
-      if (!transcript) {
-        transcript = 'No text content found in this post.';
-      }
-
+      transcript  = parts.join(' ').trim() || 'No text content found in this post.';
       log.done(`Caption text: "${transcript.slice(0, 100)}..."`);
     }
 
-    // ── Step 4: Detect claims ─────────────────────────────────────────────────
-    log.step('Step 4 — Detecting claims');
+    setStep('Detecting claims...');
     const claims = await detectClaims(transcript);
 
-    // ── Step 5: Verify claims ─────────────────────────────────────────────────
-    log.step('Step 5 — Verifying claims');
+    setStep('Verifying claims...');
     const verifiedClaims = claims.length > 0 ? await verifyAllClaims(claims) : [];
 
-    // ── Step 6: Calculate score ───────────────────────────────────────────────
-    log.step('Step 6 — Scoring');
+    setStep('Calculating score...');
     const scoreData = calculateScore(verifiedClaims);
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
-    if (jobId) cleanupJob(jobId);
+    if (downloadJobId) cleanupJob(downloadJobId);
 
-    // ── Response ──────────────────────────────────────────────────────────────
-    const response = {
+    const result = {
       url,
       mediaType,
       meta,
@@ -85,14 +78,46 @@ async function analyzeReel(req, res) {
       analyzedAt: new Date().toISOString(),
     };
 
-    log.done(`Analysis complete — Score: ${scoreData.score}% (${scoreData.risk} risk)`);
-    return res.json(response);
+    jobs.set(jobId, { status: 'complete', result });
+    scheduleCleanup(jobId);
+    log.done(`Job ${jobId} complete — Score: ${scoreData.score}% (${scoreData.risk} risk)`);
 
   } catch (err) {
-    if (jobId) cleanupJob(jobId);
-    log.error('Analysis failed', err.message);
-    return res.status(500).json({ error: err.message || 'Analysis failed' });
+    if (downloadJobId) cleanupJob(downloadJobId);
+    jobs.set(jobId, { status: 'error', error: err.message || 'Analysis failed' });
+    scheduleCleanup(jobId);
+    log.error(`Job ${jobId} failed`, err.message);
   }
 }
 
-module.exports = { analyzeReel };
+// ── POST /api/analyze — start job, return jobId immediately ──────────────────
+async function analyzeReel(req, res) {
+  const { url } = req.body;
+
+  if (!url || !url.match(/instagram\.com\/(reel|p)\//i)) {
+    return res.status(400).json({ error: 'Invalid Instagram Reel or Post URL' });
+  }
+
+  const jobId = uuidv4();
+  jobs.set(jobId, { status: 'pending', step: 'Starting...', result: null, error: null });
+
+  // Start analysis in background (don't await)
+  runAnalysis(jobId, url);
+
+  // Return jobId immediately — client will poll /status/:jobId
+  return res.json({ jobId, status: 'pending' });
+}
+
+// ── GET /api/status/:jobId — poll for result ─────────────────────────────────
+async function getStatus(req, res) {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found or expired' });
+  }
+
+  return res.json(job);
+}
+
+module.exports = { analyzeReel, getStatus };
