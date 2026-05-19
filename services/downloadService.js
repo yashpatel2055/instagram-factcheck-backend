@@ -120,20 +120,24 @@ function downloadViaYtDlp(url, jobId) {
 
     const python = process.env.PYTHON_PATH || 'python3';
 
-    // Auth strategy:
-    // 1. If INSTAGRAM_COOKIES env var set → write to temp file (used on Render)
-    // 2. Else if running locally (not on Render) → read cookies from Chrome browser automatically
+    // Auth strategy (in priority order):
+    // 1. INSTAGRAM_COOKIES_FILE — path to a cookies.txt file (local dev)
+    // 2. INSTAGRAM_COOKIES — raw cookie content as env var (Render/production)
+    // 3. Chrome browser cookies — auto-read locally if no env set
     let cookiesFlag = '';
-    const cookiesEnv = process.env.INSTAGRAM_COOKIES;
-    const isRender = !!process.env.RENDER;
+    const cookiesFile   = process.env.INSTAGRAM_COOKIES_FILE;
+    const cookiesEnv    = process.env.INSTAGRAM_COOKIES;
+    const isRender      = !!process.env.RENDER;
 
-    if (cookiesEnv) {
-      const cookiesPath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
-      fs.writeFileSync(cookiesPath, cookiesEnv, 'utf8');
-      cookiesFlag = `--cookies "${cookiesPath}"`;
+    if (cookiesFile && fs.existsSync(cookiesFile)) {
+      cookiesFlag = `--cookies "${cookiesFile}"`;
+      log.info('Using cookies from INSTAGRAM_COOKIES_FILE');
+    } else if (cookiesEnv) {
+      const tempPath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
+      fs.writeFileSync(tempPath, cookiesEnv, 'utf8');
+      cookiesFlag = `--cookies "${tempPath}"`;
       log.info('Using cookies from INSTAGRAM_COOKIES env var');
     } else if (!isRender) {
-      // Local dev: read from Chrome automatically (user must be logged in to Instagram in Chrome)
       cookiesFlag = '--cookies-from-browser chrome';
       log.info('Using cookies from local Chrome browser');
     }
