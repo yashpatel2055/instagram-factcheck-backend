@@ -3,13 +3,17 @@ const log = require('../utils/logger');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
-const SYSTEM_PROMPT = `You are an expert fact-checker. Extract ONLY verifiable factual claims from the text.
+const SYSTEM_PROMPT = `You are an expert fact-checker. The input text may be in ANY language (Hindi, English, etc.).
+
+Step 1: Translate the text to English internally.
+Step 2: Extract ONLY verifiable factual claims from the translated text.
 
 Rules:
 - Extract statements that can be verified as TRUE or FALSE
-- Skip opinions, jokes, emotions, greetings, and personal stories
-- Each claim must be a standalone sentence
-- Categorize each claim: Health, Science, Politics, History, Technology, Economy, or Other
+- Include health claims, scientific claims, myths, superstitions presented as facts
+- Skip pure opinions, jokes, greetings, and personal stories
+- Each claim must be a clear standalone English sentence
+- Categorize each claim: Health, Science, Politics, History, Technology, Economy, Nature, or Other
 - Return ONLY valid JSON — no markdown, no extra text
 
 Output format:
@@ -35,7 +39,7 @@ async function detectClaims(transcript) {
     temperature: 0.1,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user',   content: `Extract factual claims from:\n\n"${transcript}"` },
+      { role: 'user',   content: `The following text may be in Hindi or another language. Translate it to English first, then extract all verifiable factual claims:\n\n"${transcript}"` },
     ],
   });
 
