@@ -1,6 +1,7 @@
 const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const log = require('../utils/logger');
 
@@ -10,35 +11,117 @@ const DOWNLOADS_DIR = path.join(__dirname, '../downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
 /**
- * Writes Instagram cookies from env var to a temp file and returns the path.
- * Returns null if no cookies configured.
+ * Downloads a file from a URL to a local path
  */
-function getCookiesFilePath(jobId) {
-  const cookies = process.env.INSTAGRAM_COOKIES;
-  if (!cookies) return null;
-
-  const cookiesPath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
-  fs.writeFileSync(cookiesPath, cookies, 'utf8');
-  return cookiesPath;
+function downloadFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    https.get(url, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        // Follow redirect
+        file.close();
+        return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        return reject(new Error(`Failed to download file: HTTP ${res.statusCode}`));
+      }
+      res.pipe(file);
+      file.on('finish', () => file.close(resolve));
+    }).on('error', (err) => {
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
 }
 
 /**
- * Downloads an Instagram reel using yt-dlp
- * Returns { jobId, videoPath, metaPath }
+ * Downloads Instagram reel via RapidAPI (no login required)
  */
-function downloadReel(url) {
+function downloadViaRapidAPI(url, jobId) {
   return new Promise((resolve, reject) => {
-    const jobId = uuidv4();
+    const apiKey = process.env.RAPIDAPI_KEY;
+    if (!apiKey) return reject(new Error('RAPIDAPI_KEY not set'));
+
+    const encodedUrl = encodeURIComponent(url);
+    const options = {
+      method: 'GET',
+      hostname: 'social-media-video-downloader.p.rapidapi.com',
+      path: `/smvd/get/all?url=${encodedUrl}`,
+      headers: {
+        'X-RapidAPI-Key': apiKey,
+        'X-RapidAPI-Host': 'social-media-video-downloader.p.rapidapi.com',
+      },
+    };
+
+    log.step('Fetching video URL via RapidAPI...');
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', async () => {
+        try {
+          const json = JSON.parse(data);
+
+          if (!json.success || !json.links || json.links.length === 0) {
+            return reject(new Error('RapidAPI returned no download links'));
+          }
+
+          // Pick the best quality video link
+          const videoLink = json.links.find(l => l.type === 'video/mp4') || json.links[0];
+          const videoUrl = videoLink.link || videoLink.url;
+
+          if (!videoUrl) return reject(new Error('No valid video URL from RapidAPI'));
+
+          const videoPath = path.join(DOWNLOADS_DIR, `${jobId}.mp4`);
+          log.step('Downloading video file...');
+          await downloadFile(videoUrl, videoPath);
+
+          // Build meta from RapidAPI response
+          const meta = {
+            title:       json.title || '',
+            description: json.title || '',
+            uploader:    json.author || '',
+            duration:    0,
+            thumbnail:   json.thumbnail || '',
+            viewCount:   0,
+          };
+
+          log.done('Video downloaded via RapidAPI');
+          resolve({ jobId, videoPath, meta, mediaType: 'video' });
+        } catch (e) {
+          reject(new Error(`RapidAPI parse error: ${e.message}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.setTimeout(30000, () => {
+      req.destroy();
+      reject(new Error('RapidAPI request timed out'));
+    });
+    req.end();
+  });
+}
+
+/**
+ * Downloads an Instagram reel using yt-dlp (fallback)
+ */
+function downloadViaYtDlp(url, jobId) {
+  return new Promise((resolve, reject) => {
     const outputTemplate = path.join(DOWNLOADS_DIR, `${jobId}.%(ext)s`);
     const metaFile = path.join(DOWNLOADS_DIR, `${jobId}.info.json`);
 
-    log.step(`Downloading reel: ${url}`);
-
     const python = process.env.PYTHON_PATH || 'python3';
 
-    // Write cookies to temp file if available
-    const cookiesPath = getCookiesFilePath(jobId);
-    const cookiesFlag = cookiesPath ? `--cookies "${cookiesPath}"` : '';
+    // Use cookies file if provided
+    const cookiesEnv = process.env.INSTAGRAM_COOKIES;
+    let cookiesFlag = '';
+    if (cookiesEnv) {
+      const cookiesPath = path.join(DOWNLOADS_DIR, `${jobId}_cookies.txt`);
+      fs.writeFileSync(cookiesPath, cookiesEnv, 'utf8');
+      cookiesFlag = `--cookies "${cookiesPath}"`;
+    }
 
     const cmd = [
       `${python} -m yt_dlp`,
@@ -52,7 +135,6 @@ function downloadReel(url) {
     ].filter(Boolean).join(' ');
 
     exec(cmd, { timeout: 60000 }, (err, stdout, stderr) => {
-      // Parse metadata first (available even on error)
       let meta = {};
       let mediaType = 'video';
 
@@ -71,11 +153,9 @@ function downloadReel(url) {
         } catch (_) {}
       }
 
-      // Check if it's a "no video" error → treat as photo post
       const isPhotoPost = stderr && stderr.includes('There is no video in this post');
 
       if (err && !isPhotoPost) {
-        log.error('Download failed', stderr);
         return reject(new Error(`Download failed: ${stderr || err.message}`));
       }
 
@@ -85,9 +165,8 @@ function downloadReel(url) {
         return resolve({ jobId, videoPath: null, meta, mediaType });
       }
 
-      // Find the downloaded video file
       const files = fs.readdirSync(DOWNLOADS_DIR);
-      const videoFile = files.find(f => f.startsWith(jobId) && !f.endsWith('.json') && !f.endsWith('.mp3'));
+      const videoFile = files.find(f => f.startsWith(jobId) && !f.endsWith('.json') && !f.endsWith('.mp3') && !f.endsWith('_cookies.txt'));
 
       if (!videoFile) {
         return reject(new Error('Downloaded file not found'));
@@ -98,6 +177,26 @@ function downloadReel(url) {
       resolve({ jobId, videoPath, meta, mediaType });
     });
   });
+}
+
+/**
+ * Main download function — tries RapidAPI first, falls back to yt-dlp
+ */
+async function downloadReel(url) {
+  const jobId = uuidv4();
+  log.step(`Starting download for: ${url}`);
+
+  // Try RapidAPI first (no Instagram login needed)
+  if (process.env.RAPIDAPI_KEY) {
+    try {
+      return await downloadViaRapidAPI(url, jobId);
+    } catch (e) {
+      log.warn(`RapidAPI failed: ${e.message} — falling back to yt-dlp`);
+    }
+  }
+
+  // Fallback to yt-dlp
+  return downloadViaYtDlp(url, jobId);
 }
 
 /**
@@ -113,4 +212,4 @@ function cleanupJob(jobId) {
   log.info(`Cleaned up job: ${jobId}`);
 }
 
-module.exports = { downloadReel, cleanupJob, getCookiesFilePath };
+module.exports = { downloadReel, cleanupJob };
