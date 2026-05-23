@@ -183,42 +183,36 @@ function downloadViaYtDlp(url, jobId) {
       const isOnlyDeprecation = err && stderr && stderr.includes('Deprecated Feature') && !stderr.includes('ERROR:');
 
       if (isPhotoPost) {
-        log.info('Image/photo post detected — fetching metadata only...');
-        // If meta is empty (info.json not written), do a metadata-only fetch
-        if (!meta.title && !meta.description) {
-          const metaCmd = [
-            `${python} -m yt_dlp`,
-            `"${url}"`,
-            `-o "${outputTemplate}"`,
-            '--write-info-json',
-            '--skip-download',
-            '--no-playlist',
-            '--quiet',
-            '--no-warnings',
-            '--no-check-certificate',
-            cookiesFlag,
-          ].filter(Boolean).join(' ');
-
-          return exec(metaCmd, { timeout: 30000 }, (metaErr, _out, _err) => {
-            if (fs.existsSync(metaFile)) {
-              try {
-                const raw = fs.readFileSync(metaFile, 'utf8');
-                const parsed = JSON.parse(raw);
-                meta = {
-                  title:       parsed.title || '',
-                  description: parsed.description || '',
-                  uploader:    parsed.uploader || parsed.channel || '',
-                  duration:    parsed.duration || 0,
-                  thumbnail:   parsed.thumbnail || '',
-                  viewCount:   parsed.view_count || 0,
-                };
-                log.done(`Got photo caption: "${meta.description?.slice(0, 80) || meta.title?.slice(0, 80)}"`);
-              } catch (_) {}
+        log.info('Image/photo post — fetching thumbnail via oEmbed...');
+        const oembedUrl = `https://www.instagram.com/api/v1/oembed/?url=${encodeURIComponent(url)}&omitscript=true`;
+        const oClient = https;
+        const oReq = oClient.get(oembedUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (oRes) => {
+          let oData = '';
+          oRes.on('data', c => { oData += c; });
+          oRes.on('end', () => {
+            try {
+              const oembed = JSON.parse(oData);
+              meta = {
+                title:       oembed.title || '',
+                description: oembed.title || '',
+                uploader:    oembed.author_name || '',
+                duration:    0,
+                thumbnail:   oembed.thumbnail_url || '',
+                viewCount:   0,
+              };
+              log.done(`oEmbed caption: "${meta.title}" | thumbnail: ${meta.thumbnail ? 'yes' : 'no'}`);
+            } catch (_) {
+              log.warn('oEmbed parse failed, continuing with empty meta');
             }
             resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
           });
-        }
-        return resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
+        });
+        oReq.on('error', () => resolve({ jobId, videoPath: null, meta, mediaType: 'photo' }));
+        oReq.setTimeout(10000, () => {
+          oReq.destroy();
+          resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
+        });
+        return;
       }
 
       // Check what files were downloaded

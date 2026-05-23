@@ -1,6 +1,7 @@
 const { downloadReel, cleanupJob } = require('../services/downloadService');
 const { extractAudio }            = require('../services/audioService');
 const { transcribeAudio }         = require('../ai/transcribeService');
+const { analyzeImage }            = require('../ai/visionService');
 const { detectClaims }            = require('../ai/claimService');
 const { verifyAllClaims }         = require('../ai/verifyService');
 const { calculateScore }          = require('../services/scoreService');
@@ -42,16 +43,28 @@ async function runAnalysis(jobId, url) {
       transcript   = result.transcript;
       language     = result.language;
     } else {
-      // Image/photo post — fact-check the caption and description
-      setStep('Extracting image caption...');
-      const parts = [meta.title, meta.description].filter(p => p && p.trim());
-      transcript  = parts.join('\n').trim();
+      // Image/photo post — use vision AI to read text from image
+      setStep('Reading image content...');
+
+      // Try vision analysis if thumbnail is available
+      if (meta.thumbnail) {
+        try {
+          const vision = await analyzeImage(meta.thumbnail);
+          transcript = vision.fullText;
+          log.done(`Vision extracted: "${transcript.slice(0, 100)}"`);
+        } catch (e) {
+          log.warn(`Vision failed: ${e.message} — falling back to caption`);
+        }
+      }
+
+      // Fallback to caption text if vision failed or no thumbnail
+      if (!transcript) {
+        const parts = [meta.title, meta.description].filter(p => p && p.trim() && p !== '😭😭');
+        transcript = parts.join('\n').trim();
+      }
 
       if (!transcript) {
-        transcript = 'No caption or text found in this post.';
-        log.info('No caption found for image post');
-      } else {
-        log.done(`Image caption: "${transcript.slice(0, 100)}..."`);
+        transcript = 'No text or visual content could be extracted from this post.';
       }
     }
 
