@@ -183,7 +183,41 @@ function downloadViaYtDlp(url, jobId) {
       const isOnlyDeprecation = err && stderr && stderr.includes('Deprecated Feature') && !stderr.includes('ERROR:');
 
       if (isPhotoPost) {
-        log.info('Image/photo post detected — will fact-check caption & description');
+        log.info('Image/photo post detected — fetching metadata only...');
+        // If meta is empty (info.json not written), do a metadata-only fetch
+        if (!meta.title && !meta.description) {
+          const metaCmd = [
+            `${python} -m yt_dlp`,
+            `"${url}"`,
+            `-o "${outputTemplate}"`,
+            '--write-info-json',
+            '--skip-download',
+            '--no-playlist',
+            '--quiet',
+            '--no-warnings',
+            '--no-check-certificate',
+            cookiesFlag,
+          ].filter(Boolean).join(' ');
+
+          return exec(metaCmd, { timeout: 30000 }, (metaErr, _out, _err) => {
+            if (fs.existsSync(metaFile)) {
+              try {
+                const raw = fs.readFileSync(metaFile, 'utf8');
+                const parsed = JSON.parse(raw);
+                meta = {
+                  title:       parsed.title || '',
+                  description: parsed.description || '',
+                  uploader:    parsed.uploader || parsed.channel || '',
+                  duration:    parsed.duration || 0,
+                  thumbnail:   parsed.thumbnail || '',
+                  viewCount:   parsed.view_count || 0,
+                };
+                log.done(`Got photo caption: "${meta.description?.slice(0, 80) || meta.title?.slice(0, 80)}"`);
+              } catch (_) {}
+            }
+            resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
+          });
+        }
         return resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
       }
 
