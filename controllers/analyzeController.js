@@ -42,10 +42,17 @@ async function runAnalysis(jobId, url) {
       transcript   = result.transcript;
       language     = result.language;
     } else {
-      setStep('Extracting caption text...');
-      const parts = [meta.title, meta.description].filter(Boolean);
-      transcript  = parts.join(' ').trim() || 'No text content found in this post.';
-      log.done(`Caption text: "${transcript.slice(0, 100)}..."`);
+      // Image/photo post — fact-check the caption and description
+      setStep('Extracting image caption...');
+      const parts = [meta.title, meta.description].filter(p => p && p.trim());
+      transcript  = parts.join('\n').trim();
+
+      if (!transcript) {
+        transcript = 'No caption or text found in this post.';
+        log.info('No caption found for image post');
+      } else {
+        log.done(`Image caption: "${transcript.slice(0, 100)}..."`);
+      }
     }
 
     setStep('Detecting claims...');

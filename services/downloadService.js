@@ -173,17 +173,33 @@ function downloadViaYtDlp(url, jobId) {
         } catch (_) {}
       }
 
-      const isPhotoPost = stderr && stderr.includes('There is no video in this post');
+      // Treat these as image/photo posts (no video to extract)
+      const isPhotoPost = stderr && (
+        stderr.includes('There is no video in this post') ||
+        stderr.includes('No video formats found')
+      );
+
       // Deprecation warning causes non-zero exit but download may still succeed
       const isOnlyDeprecation = err && stderr && stderr.includes('Deprecated Feature') && !stderr.includes('ERROR:');
 
       if (isPhotoPost) {
-        log.info('Photo post detected — will fact-check caption & description');
+        log.info('Image/photo post detected — will fact-check caption & description');
         return resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
       }
 
-      // Check if file was actually downloaded (deprecation warning can cause false errors)
+      // Check what files were downloaded
       const files = fs.readdirSync(DOWNLOADS_DIR);
+
+      // Check if an image was downloaded (jpg/png/webp)
+      const imageFile = files.find(f =>
+        f.startsWith(jobId) && (f.endsWith('.jpg') || f.endsWith('.jpeg') || f.endsWith('.png') || f.endsWith('.webp'))
+      );
+
+      if (imageFile) {
+        log.info(`Image file downloaded: ${imageFile} — treating as photo post`);
+        return resolve({ jobId, videoPath: null, meta, mediaType: 'photo' });
+      }
+
       const videoFile = files.find(f =>
         f.startsWith(jobId) && !f.endsWith('.json') && !f.endsWith('.mp3') && !f.endsWith('_cookies.txt')
       );
